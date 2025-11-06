@@ -321,6 +321,123 @@ terraform {
   }
 }
 
+# Проверка квот в us-east-1
+module "quota_check_us_east_1" {
+  source = "./modules/quota-check"
+  count  = contains(keys(var.regions), "us-east-1") ? 1 : 0
+
+  providers = {
+    aws = aws.us_east_1
+  }
+
+  instance_type      = var.instance_type
+  required_instances = try(var.regions["us-east-1"].instance_count, 0)
+}
+
+# Проверка квот в eu-west-1
+module "quota_check_eu_west_1" {
+  source = "./modules/quota-check"
+  count  = contains(keys(var.regions), "eu-west-1") ? 1 : 0
+
+  providers = {
+    aws = aws.eu_west_1
+  }
+
+  instance_type      = var.instance_type
+  required_instances = try(var.regions["eu-west-1"].instance_count, 0)
+}
+
+# Проверка квот в ap-southeast-1
+module "quota_check_ap_southeast_1" {
+  source = "./modules/quota-check"
+  count  = contains(keys(var.regions), "ap-southeast-1") ? 1 : 0
+
+  providers = {
+    aws = aws.ap_southeast_1
+  }
+
+  instance_type      = var.instance_type
+  required_instances = try(var.regions["ap-southeast-1"].instance_count, 0)
+}
+
+# EC2 инстансы в us-east-1
+module "ec2_us_east_1" {
+  source = "./modules/ec2"
+  count  = contains(keys(var.regions), "us-east-1") ? 1 : 0
+
+  providers = {
+    aws = aws.us_east_1
+  }
+
+  instance_type        = var.instance_type
+  instance_count       = var.regions["us-east-1"].instance_count
+  instance_name_prefix = "${var.project_name}-us-east-1"
+  security_group_name  = "${var.project_name}-sg-us-east-1"
+  ami_name             = var.ami_name
+  key_pair_name        = var.key_pair_name
+  create_key_pair      = var.create_key_pair
+  public_key           = var.public_key
+
+  tags = merge(
+    var.common_tags,
+    {
+      Region = "us-east-1"
+    }
+  )
+}
+
+# EC2 инстансы в eu-west-1
+module "ec2_eu_west_1" {
+  source = "./modules/ec2"
+  count  = contains(keys(var.regions), "eu-west-1") ? 1 : 0
+
+  providers = {
+    aws = aws.eu_west_1
+  }
+
+  instance_type        = var.instance_type
+  instance_count       = var.regions["eu-west-1"].instance_count
+  instance_name_prefix = "${var.project_name}-eu-west-1"
+  security_group_name  = "${var.project_name}-sg-eu-west-1"
+  ami_name             = var.ami_name
+  key_pair_name        = var.key_pair_name
+  create_key_pair      = var.create_key_pair
+  public_key           = var.public_key
+
+  tags = merge(
+    var.common_tags,
+    {
+      Region = "eu-west-1"
+    }
+  )
+}
+
+# EC2 инстансы в ap-southeast-1
+module "ec2_ap_southeast_1" {
+  source = "./modules/ec2"
+  count  = contains(keys(var.regions), "ap-southeast-1") ? 1 : 0
+
+  providers = {
+    aws = aws.ap_southeast_1
+  }
+
+  instance_type        = var.instance_type
+  instance_count       = var.regions["ap-southeast-1"].instance_count
+  instance_name_prefix = "${var.project_name}-ap-southeast-1"
+  security_group_name  = "${var.project_name}-sg-ap-southeast-1"
+  ami_name             = var.ami_name
+  key_pair_name        = var.key_pair_name
+  create_key_pair      = var.create_key_pair
+  public_key           = var.public_key
+
+  tags = merge(
+    var.common_tags,
+    {
+      Region = "ap-southeast-1"
+    }
+  )
+}
+
 # Создаем провайдеры для каждого региона
 provider "aws" {
   alias  = "us_east_1"
@@ -337,46 +454,7 @@ provider "aws" {
   region = "ap-southeast-1"
 }
 
-# Добавьте другие регионы по необходимости
-
-# Проверка квот для каждого региона
-module "quota_check" {
-  source   = "./modules/quota-check"
-  for_each = var.regions
-
-  providers = {
-    aws = aws[each.value.provider_alias]
-  }
-
-  instance_type      = var.instance_type
-  required_instances = each.value.instance_count
-}
-
-# Создание EC2 инстансов в каждом регионе
-module "ec2" {
-  source   = "./modules/ec2"
-  for_each = var.regions
-
-  providers = {
-    aws = aws[each.value.provider_alias]
-  }
-
-  instance_type        = var.instance_type
-  instance_count       = each.value.instance_count
-  instance_name_prefix = "${var.project_name}-${each.key}"
-  security_group_name  = "${var.project_name}-sg-${each.key}"
-  ami_name             = var.ami_name
-  key_pair_name        = var.key_pair_name
-  create_key_pair      = var.create_key_pair
-  public_key           = var.public_key
-
-  tags = merge(
-    var.common_tags,
-    {
-      Region = each.key
-    }
-  )
-}
+# Добавьте другие регионы по необходимости здесь
 
 ###############################################################################
 # variables.tf
