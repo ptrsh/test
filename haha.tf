@@ -3,13 +3,17 @@
 ###############################################################################
 
 data "aws_vpc" "default" {
+  for_each = toset([var.region])
+  
   default = true
+  region  = var.region
 }
 
 data "aws_ami" "selected" {
-  count       = var.ami_id == "" ? 1 : 0
+  for_each    = var.ami_id == "" ? toset([var.region]) : []
   most_recent = true
   owners      = ["amazon"]
+  region      = var.region
 
   filter {
     name   = "name"
@@ -25,7 +29,8 @@ data "aws_ami" "selected" {
 resource "aws_security_group" "main" {
   name        = var.security_group_name
   description = "Security group for EC2 instances"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = data.aws_vpc.default[var.region].id
+  region      = var.region
 
   tags = merge(
     var.tags,
@@ -43,6 +48,7 @@ resource "aws_security_group_rule" "ingress_self" {
   security_group_id = aws_security_group.main.id
   self              = true
   description       = "Allow all traffic from same security group"
+  region            = var.region
 }
 
 resource "aws_security_group_rule" "ingress_wireguard" {
@@ -53,6 +59,7 @@ resource "aws_security_group_rule" "ingress_wireguard" {
   cidr_blocks       = ["0.0.0.0/0"]
   security_group_id = aws_security_group.main.id
   description       = "Allow WireGuard UDP traffic"
+  region            = var.region
 }
 
 resource "aws_security_group_rule" "ingress_ssh" {
@@ -63,6 +70,7 @@ resource "aws_security_group_rule" "ingress_ssh" {
   cidr_blocks       = ["0.0.0.0/0"]
   security_group_id = aws_security_group.main.id
   description       = "Allow SSH traffic"
+  region            = var.region
 }
 
 resource "aws_security_group_rule" "egress_all" {
@@ -73,12 +81,14 @@ resource "aws_security_group_rule" "egress_all" {
   cidr_blocks       = ["0.0.0.0/0"]
   security_group_id = aws_security_group.main.id
   description       = "Allow all outbound traffic"
+  region            = var.region
 }
 
 resource "aws_key_pair" "main" {
   count      = var.create_key_pair ? 1 : 0
   key_name   = var.key_pair_name
   public_key = var.public_key
+  region     = var.region
 
   tags = merge(
     var.tags,
@@ -90,10 +100,11 @@ resource "aws_key_pair" "main" {
 
 resource "aws_instance" "main" {
   count                  = var.instance_count
-  ami                    = var.ami_id != "" ? var.ami_id : data.aws_ami.selected[0].id
+  ami                    = var.ami_id != "" ? var.ami_id : data.aws_ami.selected[var.region].id
   instance_type          = var.instance_type
   key_name               = var.create_key_pair ? aws_key_pair.main[0].key_name : var.key_pair_name
   vpc_security_group_ids = [aws_security_group.main.id]
+  region                 = var.region
   
   tags = merge(
     var.tags,
@@ -110,6 +121,11 @@ resource "aws_instance" "main" {
 ###############################################################################
 # modules/ec2/variables.tf
 ###############################################################################
+
+variable "region" {
+  description = "AWS регион для создания ресурсов"
+  type        = string
+}
 
 variable "instance_type" {
   description = "Тип EC2 инстанса"
@@ -208,7 +224,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 6.0.0"
     }
   }
 }
@@ -220,13 +236,17 @@ terraform {
 data "aws_servicequotas_service_quota" "ec2_standard" {
   service_code = "ec2"
   quota_code   = "L-1216C47A"
+  region       = var.region
 }
 
 data "aws_ec2_instance_type" "selected" {
   instance_type = var.instance_type
+  region        = var.region
 }
 
 data "aws_instances" "running_standard" {
+  region = var.region
+  
   filter {
     name   = "instance-state-name"
     values = ["running"]
@@ -245,6 +265,11 @@ locals {
 ###############################################################################
 # modules/quota-check/variables.tf
 ###############################################################################
+
+variable "region" {
+  description = "AWS регион для проверки"
+  type        = string
+}
 
 variable "instance_type" {
   description = "Тип инстанса для расчета vCPU"
@@ -301,7 +326,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 6.0.0"
     }
   }
 }
@@ -316,63 +341,36 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 6.0.0"
     }
   }
 }
 
-# Проверка квот в us-east-1
-module "quota_check_us_east_1" {
-  source = "./modules/quota-check"
-  count  = contains(keys(var.regions), "us-east-1") ? 1 : 0
-
-  providers = {
-    aws = aws.us_east_1
-  }
-
-  instance_type      = var.instance_type
-  required_instances = try(var.regions["us-east-1"].instance_count, 0)
+# Один провайдер для всех регионов!
+provider "aws" {
+  region = var.default_region
 }
 
-# Проверка квот в eu-west-1
-module "quota_check_eu_west_1" {
-  source = "./modules/quota-check"
-  count  = contains(keys(var.regions), "eu-west-1") ? 1 : 0
+# Проверка квот для каждого региона
+module "quota_check" {
+  source   = "./modules/quota-check"
+  for_each = var.regions
 
-  providers = {
-    aws = aws.eu_west_1
-  }
-
+  region             = each.key
   instance_type      = var.instance_type
-  required_instances = try(var.regions["eu-west-1"].instance_count, 0)
+  required_instances = each.value.instance_count
 }
 
-# Проверка квот в ap-southeast-1
-module "quota_check_ap_southeast_1" {
-  source = "./modules/quota-check"
-  count  = contains(keys(var.regions), "ap-southeast-1") ? 1 : 0
+# Создание EC2 инстансов в каждом регионе
+module "ec2" {
+  source   = "./modules/ec2"
+  for_each = var.regions
 
-  providers = {
-    aws = aws.ap_southeast_1
-  }
-
-  instance_type      = var.instance_type
-  required_instances = try(var.regions["ap-southeast-1"].instance_count, 0)
-}
-
-# EC2 инстансы в us-east-1
-module "ec2_us_east_1" {
-  source = "./modules/ec2"
-  count  = contains(keys(var.regions), "us-east-1") ? 1 : 0
-
-  providers = {
-    aws = aws.us_east_1
-  }
-
+  region               = each.key
   instance_type        = var.instance_type
-  instance_count       = var.regions["us-east-1"].instance_count
-  instance_name_prefix = "${var.project_name}-us-east-1"
-  security_group_name  = "${var.project_name}-sg-us-east-1"
+  instance_count       = each.value.instance_count
+  instance_name_prefix = "${var.project_name}-${each.key}"
+  security_group_name  = "${var.project_name}-sg-${each.key}"
   ami_name             = var.ami_name
   key_pair_name        = var.key_pair_name
   create_key_pair      = var.create_key_pair
@@ -381,80 +379,10 @@ module "ec2_us_east_1" {
   tags = merge(
     var.common_tags,
     {
-      Region = "us-east-1"
+      Region = each.key
     }
   )
 }
-
-# EC2 инстансы в eu-west-1
-module "ec2_eu_west_1" {
-  source = "./modules/ec2"
-  count  = contains(keys(var.regions), "eu-west-1") ? 1 : 0
-
-  providers = {
-    aws = aws.eu_west_1
-  }
-
-  instance_type        = var.instance_type
-  instance_count       = var.regions["eu-west-1"].instance_count
-  instance_name_prefix = "${var.project_name}-eu-west-1"
-  security_group_name  = "${var.project_name}-sg-eu-west-1"
-  ami_name             = var.ami_name
-  key_pair_name        = var.key_pair_name
-  create_key_pair      = var.create_key_pair
-  public_key           = var.public_key
-
-  tags = merge(
-    var.common_tags,
-    {
-      Region = "eu-west-1"
-    }
-  )
-}
-
-# EC2 инстансы в ap-southeast-1
-module "ec2_ap_southeast_1" {
-  source = "./modules/ec2"
-  count  = contains(keys(var.regions), "ap-southeast-1") ? 1 : 0
-
-  providers = {
-    aws = aws.ap_southeast_1
-  }
-
-  instance_type        = var.instance_type
-  instance_count       = var.regions["ap-southeast-1"].instance_count
-  instance_name_prefix = "${var.project_name}-ap-southeast-1"
-  security_group_name  = "${var.project_name}-sg-ap-southeast-1"
-  ami_name             = var.ami_name
-  key_pair_name        = var.key_pair_name
-  create_key_pair      = var.create_key_pair
-  public_key           = var.public_key
-
-  tags = merge(
-    var.common_tags,
-    {
-      Region = "ap-southeast-1"
-    }
-  )
-}
-
-# Создаем провайдеры для каждого региона
-provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
-}
-
-provider "aws" {
-  alias  = "eu_west_1"
-  region = "eu-west-1"
-}
-
-provider "aws" {
-  alias  = "ap_southeast_1"
-  region = "ap-southeast-1"
-}
-
-# Добавьте другие регионы по необходимости здесь
 
 ###############################################################################
 # variables.tf
@@ -466,21 +394,27 @@ variable "project_name" {
   default     = "my-project"
 }
 
+variable "default_region" {
+  description = "Default AWS регион для провайдера"
+  type        = string
+  default     = "us-east-1"
+}
+
 variable "regions" {
-  description = "Конфигурация регионов и количества инстансов"
+  description = "Map регионов и количества инстансов в каждом"
   type = map(object({
-    provider_alias  = string
-    instance_count  = number
+    instance_count = number
   }))
   
   # Пример:
   # regions = {
   #   "us-east-1" = {
-  #     provider_alias = "us_east_1"
   #     instance_count = 2
   #   }
   #   "eu-west-1" = {
-  #     provider_alias = "eu_west_1"
+  #     instance_count = 3
+  #   }
+  #   "ap-southeast-1" = {
   #     instance_count = 1
   #   }
   # }
@@ -574,21 +508,24 @@ output "all_instance_ids" {
 
 project_name = "my-infrastructure"
 
-# Конфигурация регионов
-# ВАЖНО: provider_alias должен соответствовать alias в main.tf
+# Default регион для провайдера
+default_region = "us-east-1"
+
+# Конфигурация регионов - ЛЮБЫЕ регионы AWS!
 regions = {
   "us-east-1" = {
-    provider_alias = "us_east_1"
     instance_count = 2
   }
   "eu-west-1" = {
-    provider_alias = "eu_west_1"
     instance_count = 3
   }
   "ap-southeast-1" = {
-    provider_alias = "ap_southeast_1"
     instance_count = 1
   }
+  "eu-central-1" = {
+    instance_count = 2
+  }
+  # Добавляйте любые регионы без изменения кода!
 }
 
 # Настройки инстансов
@@ -598,7 +535,7 @@ ami_name      = "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
 # SSH ключ
 key_pair_name   = "my-keypair"
 create_key_pair = true
-# public_key    = "ssh-rsa AAAA..."  # Раскомментируйте и добавьте ваш ключ
+# public_key    = "ssh-rsa AAAA..."
 
 # Теги
 common_tags = {
@@ -611,54 +548,57 @@ common_tags = {
 # import.tf - Импорт существующих инстансов
 ###############################################################################
 
-# Импорт существующих инстансов в state
+# Импорт с AWS Provider 6.0 стал проще!
+# Новый синтаксис: ID@регион
 #
-# ДА, достаточно только ID инстанса!
-# Terraform автоматически получит всю остальную информацию из AWS API
-#
-# Способ 1: Команда terraform import
-# terraform import 'module.ec2["us-east-1"].aws_instance.main[0]' i-1234567890abcdef0
-# terraform import 'module.ec2["us-east-1"].aws_instance.main[1]' i-0987654321fedcba0
+# Способ 1: Команда terraform import с @регион
+# terraform import 'module.ec2["us-east-1"].aws_instance.main[0]' i-1234567890abcdef0@us-east-1
+# terraform import 'module.ec2["us-east-1"].aws_instance.main[1]' i-0987654321fedcba0@us-east-1
+# terraform import 'module.ec2["eu-west-1"].aws_instance.main[0]' i-aabbccdd11223344@eu-west-1
 #
 # Способ 2: Import блоки (Terraform 1.5+)
-# Раскомментируйте нужные блоки ниже:
 
 # import {
 #   to = module.ec2["us-east-1"].aws_instance.main[0]
-#   id = "i-1234567890abcdef0"
+#   id = "i-1234567890abcdef0@us-east-1"
 # }
 
 # import {
 #   to = module.ec2["us-east-1"].aws_instance.main[1]
-#   id = "i-0987654321fedcba0"
+#   id = "i-0987654321fedcba0@us-east-1"
 # }
 
 # import {
 #   to = module.ec2["eu-west-1"].aws_instance.main[0]
-#   id = "i-aabbccdd11223344"
+#   id = "i-aabbccdd11223344@eu-west-1"
 # }
-
-# После импорта:
-# 1. Terraform получит все параметры инстанса из AWS
-# 2. При следующем apply Terraform может попытаться изменить инстанс, 
-#    чтобы привести его к конфигурации в коде
-# 3. Проверьте plan перед apply!
 
 ###############################################################################
 # README.md
 ###############################################################################
 
-# AWS EC2 Multi-Region Infrastructure
+# AWS EC2 Multi-Region Infrastructure (AWS Provider 6.0+)
 
-Terraform модуль для управления EC2 инстансами в нескольких AWS регионах.
+Terraform модуль для управления EC2 инстансами в **любых** AWS регионах.
+
+## 🎉 Новое в AWS Provider 6.0
+
+Использует новую возможность AWS Provider 6.0 - атрибут `region` на уровне ресурсов!
+
+**Преимущества:**
+- ✅ **Один провайдер** вместо десятков с алиасами
+- ✅ **Динамические регионы** - добавляйте любые регионы без изменения кода
+- ✅ **Меньше памяти** - один instance провайдера
+- ✅ **Проще импорт** - новый синтаксис `ID@регион`
+- ✅ **Чище код** - используем `for_each` для модулей
 
 ## Структура проекта
 
 ```
 .
 ├── modules/
-│   ├── ec2/              # Модуль создания EC2 инстансов
-│   │   ├── main.tf
+│   ├── ec2/              # Модуль создания EC2
+│   │   ├── main.tf       # Все ресурсы с region атрибутом
 │   │   ├── variables.tf
 │   │   ├── outputs.tf
 │   │   └── versions.tf
@@ -667,87 +607,163 @@ Terraform модуль для управления EC2 инстансами в �
 │       ├── variables.tf
 │       ├── outputs.tf
 │       └── versions.tf
-├── main.tf               # Основная конфигурация
-├── variables.tf          # Переменные
-├── outputs.tf            # Выходы
-├── import.tf             # Импорт существующих ресурсов
+├── main.tf               # Один provider + for_each модулей
+├── variables.tf
+├── outputs.tf
+├── import.tf
 ├── terraform.tfvars.example
 └── README.md
 ```
 
+## Требования
+
+⚠️ **Обязательно:**
+- **AWS Provider >= 6.0.0**
+- Terraform >= 1.0
+
 ## Конфигурация регионов
 
-Просто укажите в `terraform.tfvars` какие регионы и сколько инстансов:
+Просто добавьте любой регион в `terraform.tfvars`:
 
 ```hcl
 regions = {
   "us-east-1" = {
-    provider_alias = "us_east_1"
     instance_count = 2
   }
   "eu-west-1" = {
-    provider_alias = "eu_west_1"
     instance_count = 3
   }
   "ap-southeast-1" = {
-    provider_alias = "ap_southeast_1"
     instance_count = 1
   }
+  "eu-central-1" = {
+    instance_count = 2
+  }
+  # Добавляйте любые AWS регионы!
+  # Больше НЕ НУЖНО менять код!
 }
 ```
 
-**Важно:** Если добавляете новый регион, создайте для него provider в `main.tf`:
-
-```hcl
-provider "aws" {
-  alias  = "eu_central_1"
-  region = "eu-central-1"
-}
-```
+**Никаких изменений в коде не требуется!** Provider 6.0 автоматически обработает любой регион.
 
 ## Быстрый старт
 
-### 1. Проверка квот
+### 1. Установка правильной версии провайдера
+
+Убедитесь что используете AWS Provider >= 6.0:
+
+```bash
+terraform version
+# Terraform должен показать aws provider >= 6.0.0
+```
+
+### 2. Проверка квот
 
 ```bash
 terraform init
-
-# Проверка квот без создания
-terraform plan -target=module.quota_check
-
-# Просмотр результатов
 terraform apply -target=module.quota_check
 terraform output quota_check_results
 ```
 
-Вывод покажет для каждого региона:
-```
-{
-  "us-east-1" = {
-    available     = 45
-    can_create    = true
-    current_usage = 10
-    quota_limit   = 55
-    required_vcpu = 4
-  }
-  ...
-}
-```
-
-### 2. Создание инстансов
+### 3. Создание инстансов
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
-nano terraform.tfvars  # Отредактируйте конфигурацию
+nano terraform.tfvars
 
 terraform plan
 terraform apply
 ```
 
-### 3. Вывод информации
+## Импорт существующих инстансов
+
+### Новый синтаксис в Provider 6.0: `ID@регион`
+
+**Способ 1: CLI команда**
 
 ```bash
-# Все инстансы по регионам
+# Новый синтаксис с @регион
+terraform import 'module.ec2["us-east-1"].aws_instance.main[0]' i-1234567890abcdef0@us-east-1
+
+terraform import 'module.ec2["eu-west-1"].aws_instance.main[0]' i-aabbccdd11223344@eu-west-1
+```
+
+**Способ 2: Import блоки (Terraform 1.5+)**
+
+```hcl
+import {
+  to = module.ec2["us-east-1"].aws_instance.main[0]
+  id = "i-1234567890abcdef0@us-east-1"  # Указываем регион после @
+}
+```
+
+### Пример: импорт нескольких инстансов
+
+```bash
+# Есть 3 ручных инстанса в us-east-1
+terraform import 'module.ec2["us-east-1"].aws_instance.main[0]' i-111111@us-east-1
+terraform import 'module.ec2["us-east-1"].aws_instance.main[1]' i-222222@us-east-1
+terraform import 'module.ec2["us-east-1"].aws_instance.main[2]' i-333333@us-east-1
+
+# В terraform.tfvars указываем 5 инстансов
+regions = {
+  "us-east-1" = {
+    instance_count = 5  # 3 импортированных + 2 новых
+  }
+}
+
+terraform apply  # Создаст еще 2
+```
+
+## Основной файл конфигурации
+
+`main.tf` теперь **очень простой**:
+
+```hcl
+# Один провайдер!
+provider "aws" {
+  region = var.default_region
+}
+
+# Модули с for_each - работают для ЛЮБЫХ регионов
+module "ec2" {
+  source   = "./modules/ec2"
+  for_each = var.regions
+
+  region        = each.key          # Магия Provider 6.0!
+  instance_count = each.value.instance_count
+  # ...
+}
+```
+
+Весь секрет в том, что каждый ресурс внутри модуля имеет атрибут `region`:
+
+```hcl
+# modules/ec2/main.tf
+resource "aws_instance" "main" {
+  region        = var.region  # Provider 6.0 автоматически использует нужный регион!
+  instance_type = var.instance_type
+  # ...
+}
+```
+
+## Переменные
+
+| Переменная | Описание | По умолчанию | Обязательно |
+|-----------|----------|--------------|-------------|
+| `project_name` | Имя проекта | `my-project` | Нет |
+| `default_region` | Default регион провайдера | `us-east-1` | Нет |
+| `regions` | Map регионов и количества | - | Да |
+| `instance_type` | Тип инстанса | `t3.micro` | Нет |
+| `key_pair_name` | Имя SSH ключа | - | Да |
+
+## Outputs
+
+```bash
+# Квоты по всем регионам
+terraform output quota_check_results
+
+# Инстансы по регионам
 terraform output instances_by_region
 
 # SSH команды
@@ -757,231 +773,113 @@ terraform output ssh_commands
 terraform output all_instance_ids
 ```
 
-## Импорт существующих инстансов
-
-### Вопрос: Достаточно ли только ID инстанса для импорта?
-
-**Ответ: ДА!** Terraform автоматически получит всю информацию через AWS API.
-
-### Как импортировать
-
-**Способ 1: Команда terraform import**
-
-```bash
-# Импортируем существующий инстанс в us-east-1
-terraform import 'module.ec2["us-east-1"].aws_instance.main[0]' i-1234567890abcdef0
-
-# Импортируем второй инстанс в us-east-1
-terraform import 'module.ec2["us-east-1"].aws_instance.main[1]' i-0987654321fedcba0
-
-# Импортируем инстанс в eu-west-1
-terraform import 'module.ec2["eu-west-1"].aws_instance.main[0]' i-aabbccdd11223344
-```
-
-Что происходит:
-1. Terraform запрашивает информацию об инстансе из AWS API
-2. Получает все параметры (AMI, type, security groups, tags и т.д.)
-3. Сохраняет в state
-4. При следующем `plan` покажет, какие изменения нужны, чтобы привести инстанс к конфигурации в коде
-
-**Способ 2: Import блоки (Terraform 1.5+)**
-
-Добавьте в `import.tf`:
-
-```hcl
-import {
-  to = module.ec2["us-east-1"].aws_instance.main[0]
-  id = "i-1234567890abcdef0"
-}
-
-import {
-  to = module.ec2["us-east-1"].aws_instance.main[1]
-  id = "i-0987654321fedcba0"
-}
-```
-
-Затем:
-```bash
-terraform plan   # Покажет что будет импортировано
-terraform apply  # Импортирует в state
-```
-
-### Важно после импорта
-
-После импорта **обязательно** проверьте plan:
-
-```bash
-terraform plan
-```
-
-Terraform может показать, что хочет изменить инстанс. Это происходит если:
-- Теги отличаются от конфигурации
-- Security group другой
-- AMI или instance type отличаются
-
-**Варианты действий:**
-
-1. **Привести инстанс к конфигурации** - `terraform apply` изменит инстанс
-2. **Изменить конфигурацию** - отредактируйте код под существующий инстанс
-3. **Удалить из state** - `terraform state rm ...` если не хотите управлять
-
-### Пример импорта
-
-```bash
-# Есть 3 ручных инстанса в us-east-1
-# Хотим добавить их в Terraform и создать еще 2
-
-# 1. Импортируем существующие
-terraform import 'module.ec2["us-east-1"].aws_instance.main[0]' i-111111
-terraform import 'module.ec2["us-east-1"].aws_instance.main[1]' i-222222
-terraform import 'module.ec2["us-east-1"].aws_instance.main[2]' i-333333
-
-# 2. В terraform.tfvars указываем 5 инстансов
-regions = {
-  "us-east-1" = {
-    provider_alias = "us_east_1"
-    instance_count = 5  # 3 импортированных + 2 новых
-  }
-}
-
-# 3. Применяем - Terraform создаст еще 2 инстанса
-terraform plan   # Покажет: 2 to add
-terraform apply
-```
-
 ## Управление State
 
-### Просмотр state
-
 ```bash
-# Все ресурсы
+# Просмотр всех ресурсов
 terraform state list
 
-# Только EC2 инстансы
-terraform state list | grep aws_instance
-
-# Детали конкретного инстанса
+# Детали инстанса
 terraform state show 'module.ec2["us-east-1"].aws_instance.main[0]'
+
+# Удалить из state (оставить в AWS)
+terraform state rm 'module.ec2["us-east-1"].aws_instance.main[0]'
 ```
 
-### Удаление из state (без удаления в AWS)
+## Миграция с Provider 5.x
 
-```bash
-# Убрать инстанс из управления Terraform
-terraform state rm 'module.ec2["us-east-1"].aws_instance.main[1]'
+Если у вас был код с множественными providers:
 
-# Инстанс останется в AWS, но Terraform больше не будет его управлять
-```
-
-### Remote State (для команд)
-
+**Было:**
 ```hcl
-# backend.tf
-terraform {
-  backend "s3" {
-    bucket         = "my-terraform-state"
-    key            = "ec2/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "terraform-locks"
-    encrypt        = true
-  }
-}
-```
-
-## Добавление нового региона
-
-```hcl
-# 1. В main.tf добавьте provider
 provider "aws" {
-  alias  = "ap_northeast_1"
-  region = "ap-northeast-1"
+  alias  = "us_east_1"
+  region = "us-east-1"
 }
 
-# 2. В terraform.tfvars добавьте регион
-regions = {
-  # ... существующие регионы ...
-  "ap-northeast-1" = {
-    provider_alias = "ap_northeast_1"
-    instance_count = 2
+provider "aws" {
+  alias  = "eu_west_1"
+  region = "eu-west-1"
+}
+
+module "ec2_us" {
+  providers = { aws = aws.us_east_1 }
+  # ...
+}
+```
+
+**Стало:**
+```hcl
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "ec2" {
+  for_each = var.regions
+  region   = each.key  # Просто!
+  # ...
+}
+```
+
+### Шаги миграции:
+
+1. Обновите provider до 6.0:
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 6.0.0"
+    }
   }
 }
-
-# 3. Примените
-terraform apply
 ```
 
-## Переменные
+2. Выполните `terraform init -upgrade`
 
-| Переменная | Описание | Обязательно |
-|-----------|----------|-------------|
-| `project_name` | Имя проекта | Нет |
-| `regions` | Map регионов и количества инстансов | Да |
-| `instance_type` | Тип инстанса (default: t3.micro) | Нет |
-| `ami_name` | Имя AMI для поиска | Нет |
-| `key_pair_name` | Имя SSH ключа | Да |
-| `create_key_pair` | Создать новый ключ? | Нет |
-| `public_key` | Публичный SSH ключ | Если create_key_pair=true |
-
-## Outputs
-
-```bash
-# Проверка квот
-terraform output quota_check_results
-
-# Инстансы по регионам
-terraform output instances_by_region
-
-# SSH команды
-terraform output ssh_commands
-
-# Все ID инстансов (плоский список)
-terraform output all_instance_ids
-```
+3. При первом `terraform plan` после апгрейда, Terraform покажет изменения для добавления атрибута `region` ко всем ресурсам. Это нормально!
 
 ## Troubleshooting
+
+### Provider version < 6.0
+
+```
+Error: Invalid attribute
+attribute "region" is not expected here
+```
+
+**Решение:** Обновите провайдер:
+```bash
+terraform init -upgrade
+```
 
 ### "Quota exceeded"
 
 ```bash
-# Проверьте квоты
 terraform output quota_check_results
-
-# Если недостаточно - запросите увеличение в AWS Console:
+# Запросите увеличение в AWS Console:
 # Service Quotas -> EC2 -> Running On-Demand Standard instances
 ```
 
-### "Provider not found"
+## Преимущества нового подхода
 
-Убедитесь что:
-1. В `main.tf` есть provider с нужным alias
-2. В `regions` указан правильный `provider_alias`
+**Provider 5.x (старый):**
+- ❌ Нужен отдельный provider для каждого региона
+- ❌ Нужен отдельный модуль для каждого региона
+- ❌ Большое потребление памяти
+- ❌ Сложный код с множеством алиасов
+- ❌ Нельзя использовать for_each с providers
 
-### После импорта Terraform хочет всё изменить
-
-```bash
-# Посмотрите что именно
-terraform plan
-
-# Вариант 1: Измените код под существующую конфигурацию
-# Вариант 2: Примените изменения (осторожно!)
-# Вариант 3: Удалите из state если не хотите управлять
-terraform state rm 'module.ec2["us-east-1"].aws_instance.main[0]'
-```
-
-## Требования
-
-- Terraform >= 1.0
-- AWS CLI с настроенными credentials
-- AWS Provider ~> 5.0
+**Provider 6.0 (новый):**
+- ✅ Один provider для всех регионов
+- ✅ Один модуль с for_each для всех регионов
+- ✅ Меньшее потребление памяти
+- ✅ Простой и читаемый код
+- ✅ Динамическое добавление регионов
 
 ## Security
 
 ⚠️ **ВАЖНО:**
 - Не коммитьте `terraform.tfvars` с приватными ключами
-- Добавьте в `.gitignore`: `*.tfvars`, `*.tfstate*`
 - Используйте remote state с шифрованием
-- Ограничьте SSH доступ (0.0.0.0/0 только для примера!)
-
-## Лицензия
-
-MIT
+- Ограничьте SSH доступ (0.0.0.0/0
